@@ -25,6 +25,8 @@ KP = 18.0
 KD = 6.0
 LR = 0.001
 LAMBDA = 2.0
+ETA_B = 0.002
+ETA_C = 0.0005
 
 # Unknown structured disturbance (quadratic drag)
 QUAD_DRAG_BASE = 0.2
@@ -35,6 +37,7 @@ BIAS_LEVELS = [1.0, 2.0, 3.0]
 
 # Residual estimator limits
 DHAT_MAX = 5.0
+C_MAX = 2.0
 GATE_ERR = 0.02
 
 MASS_VALUES = [0.5, 1.0, 2.0]
@@ -71,7 +74,8 @@ def simulate(baseline: str, mass: float, friction: float, noise: float, delay_st
     random.seed(seed)
     x = 0.0
     v = 0.0
-    w = 0.0  # disturbance estimator
+    b_hat = 0.0
+    c_hat = 0.0
     w_max = DHAT_MAX
 
     # disturbance setup
@@ -102,16 +106,20 @@ def simulate(baseline: str, mass: float, friction: float, noise: float, delay_st
         u_nom = KP * error - KD * v_obs
 
         u_res = 0.0
+        d_hat = 0.0
         # residuals as disturbance estimator: u = u_nom - d_hat
         if baseline == "B1":
-            u_res = w
-            u = u_nom - u_res
+            d_hat = b_hat + c_hat * v_obs * abs(v_obs)
+            u_res = d_hat
+            u = u_nom - d_hat
         elif baseline == "B2":
-            u_res = w
-            u = u_nom - u_res
+            d_hat = b_hat + c_hat * v_obs * abs(v_obs)
+            u_res = d_hat
+            u = u_nom - d_hat
         elif baseline == "B3":
-            u_res = random.gauss(0, 0.2)
-            u = u_nom - u_res
+            d_hat = random.gauss(0, 0.2)
+            u_res = d_hat
+            u = u_nom - d_hat
         else:
             u = u_nom
 
@@ -134,16 +142,18 @@ def simulate(baseline: str, mass: float, friction: float, noise: float, delay_st
         v = v + a * DT
         x = x + v * DT
 
-        # learning update (disturbance estimator)
+        # learning update (structured disturbance estimator)
         if baseline == "B1":
             e = TARGET - x
             e_dot = -v
             s = e_dot + LAMBDA * e
             if abs(e) > GATE_ERR:
-                w += LR * s
-            w = max(-DHAT_MAX, min(DHAT_MAX, w))
+                b_hat += ETA_B * s
+                c_hat += ETA_C * s * v_obs * abs(v_obs)
+            b_hat = max(-DHAT_MAX, min(DHAT_MAX, b_hat))
+            c_hat = max(0.0, min(C_MAX, c_hat))
 
-        drift = max(drift, abs(w))
+        drift = max(drift, abs(b_hat))
 
         if math.isnan(x) or abs(x) > XMAX:
             diverged = True
@@ -209,9 +219,11 @@ def adaptation_test():
 
     def run_single(baseline: str, seed: int, bias_level: float, drag_mult: float):
         random.seed(seed)
-        x, v, w = 0.0, 0.0, 0.0
+        x, v = 0.0, 0.0
+        b_hat, c_hat = 0.0, 0.0
         u_buffer = [0.0 for _ in range(delay_steps + 1)]
         errors, us, u_residuals, d_trues = [], [], [], []
+        b_hats, c_hats, b_trues = [], [], []
         recovery_times = []
         step_times = [segment_len, segment_len * 2]
 
@@ -227,14 +239,17 @@ def adaptation_test():
 
             u_res = 0.0
             if baseline == "B1":
-                u_res = w
-                u = u_nom - u_res
+                d_hat = b_hat + c_hat * v_obs * abs(v_obs)
+                u_res = d_hat
+                u = u_nom - d_hat
             elif baseline == "B2":
-                u_res = w
-                u = u_nom - u_res
+                d_hat = b_hat + c_hat * v_obs * abs(v_obs)
+                u_res = d_hat
+                u = u_nom - d_hat
             elif baseline == "B3":
-                u_res = random.gauss(0, 0.2)
-                u = u_nom - u_res
+                d_hat = random.gauss(0, 0.2)
+                u_res = d_hat
+                u = u_nom - d_hat
             else:
                 u = u_nom
 
@@ -251,13 +266,18 @@ def adaptation_test():
                 e_dot = -v
                 s = e_dot + LAMBDA * e
                 if abs(e) > GATE_ERR:
-                    w += LR * s
-                w = max(-DHAT_MAX, min(DHAT_MAX, w))
+                    b_hat += ETA_B * s
+                    c_hat += ETA_C * s * v_obs * abs(v_obs)
+                b_hat = max(-DHAT_MAX, min(DHAT_MAX, b_hat))
+                c_hat = max(0.0, min(C_MAX, c_hat))
 
             errors.append(TARGET - x)
             us.append(u_applied)
             u_residuals.append(u_res)
             d_trues.append(bias + d_quad)
+            b_hats.append(b_hat)
+            c_hats.append(c_hat)
+            b_trues.append(bias)
 
             # recovery time computed after rollout
 
@@ -291,6 +311,19 @@ def adaptation_test():
             if den1 > 0 and den2 > 0:
                 corr = num / (den1 * den2)
 
+        corr_b = float("nan")
+        if len(b_hats) > 1:
+            mb = sum(b_hats) / len(b_hats)
+            mt = sum(b_trues) / len(b_trues)
+            num = sum((b_hats[i] - mb) * (b_trues[i] - mt) for i in range(len(b_hats)))
+            den1 = math.sqrt(sum((b_hats[i] - mb) ** 2 for i in range(len(b_hats))))
+            den2 = math.sqrt(sum((b_trues[i] - mt) ** 2 for i in range(len(b_trues))))
+            if den1 > 0 and den2 > 0:
+                corr_b = num / (den1 * den2)
+
+        c_true = QUAD_DRAG_BASE * drag_mult
+        c_relerr = abs(c_hat - c_true) / max(1e-6, c_true)
+
         return {
             "rmse": rmse,
             "recovery_time_after_step": recovery_time_after_step,
@@ -301,10 +334,15 @@ def adaptation_test():
             "res_p50": pct(0.5),
             "res_p90": pct(0.9),
             "corr_res_dist": corr,
+            "corr_b": corr_b,
+            "c_relerr": c_relerr,
             "errors": errors,
             "u_res": u_residuals,
             "d_true": d_trues,
             "u": us,
+            "b_hat": b_hats,
+            "c_hat": c_hats,
+            "b_true": b_trues,
         }
 
     results = {b: [] for b in BASELINES}
@@ -338,6 +376,29 @@ def adaptation_test():
 
     # representative run for plots/spectrum
     rep = run_single("B1", 0, bias_level=3.0, drag_mult=6.0)
+
+    # b_hat/c_hat trajectories
+    plt.figure(figsize=(8,5))
+    plt.plot(np.arange(len(rep["b_hat"])) * DT, rep["b_hat"], label="b_hat")
+    plt.plot(np.arange(len(rep["b_true"])) * DT, rep["b_true"], label="b_true")
+    plt.xlabel("time (s)")
+    plt.ylabel("bias")
+    plt.title("b_hat vs b_true")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(os.path.join(RESULTS_DIR, "b_hat_trace.png"))
+    plt.close()
+
+    plt.figure(figsize=(8,5))
+    plt.plot(np.arange(len(rep["c_hat"])) * DT, rep["c_hat"], label="c_hat")
+    plt.axhline(QUAD_DRAG_BASE * 6.0, color="r", linestyle="--", label="c_true")
+    plt.xlabel("time (s)")
+    plt.ylabel("drag coeff")
+    plt.title("c_hat vs c_true")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(os.path.join(RESULTS_DIR, "c_hat_trace.png"))
+    plt.close()
 
     # scatter residual vs disturbance
     plt.figure(figsize=(6,5))
@@ -409,6 +470,8 @@ def adaptation_test():
             "res_p50": mean(collect(b, "res_p50")),
             "res_p90": mean(collect(b, "res_p90")),
             "corr_res_dist": mean(collect(b, "corr_res_dist")),
+            "corr_b": mean(collect(b, "corr_b")) if b == "B1" else float("nan"),
+            "c_relerr": mean(collect(b, "c_relerr")) if b == "B1" else float("nan"),
         }
 
     # significance B1 vs B0 (95% CI) for key metrics
@@ -537,12 +600,12 @@ def run_all():
         f.write(f"90% CI: {summary['B1_vs_B0']['rmse_diff_ci']}\n\n")
 
         f.write("\n## Adaptation Test (bias +/−/0, noise=mid, delay=20ms)\n\n")
-        f.write("| Baseline | RMSE | Recovery Time | Steady State Error | Effort | Smoothness | ResMean | ResP50 | ResP90 | Corr(res,dist) |\n")
-        f.write("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n")
+        f.write("| Baseline | RMSE | Recovery Time | Steady State Error | Effort | Smoothness | ResMean | ResP50 | ResP90 | Corr(res,dist) | Corr(b_hat,b_true) | c_relerr |\n")
+        f.write("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n")
         for b in BASELINES:
             s = adap_summary[b]
             f.write(
-                f"| {b} | {s['rmse']:.4f} | {s['recovery_time_after_step']:.4f} | {s['steady_state_error']:.4f} | {s['effort']:.4f} | {s['smoothness']:.4f} | {s['res_mean']:.4f} | {s['res_p50']:.4f} | {s['res_p90']:.4f} | {s['corr_res_dist']:.4f} |\n"
+                f"| {b} | {s['rmse']:.4f} | {s['recovery_time_after_step']:.4f} | {s['steady_state_error']:.4f} | {s['effort']:.4f} | {s['smoothness']:.4f} | {s['res_mean']:.4f} | {s['res_p50']:.4f} | {s['res_p90']:.4f} | {s['corr_res_dist']:.4f} | {s['corr_b']:.4f} | {s['c_relerr']:.4f} |\n"
             )
         f.write("\n**B1 vs B0 (95% CI)**\n\n")
         for metric, stat in adap_diffs.items():
@@ -550,37 +613,41 @@ def run_all():
         f.write("\nLearning curve: phase1/results/learning_curve.png\n")
         f.write("Scatter: phase1/results/scatter_res_vs_dist.png\n")
         f.write("Spectrum: phase1/results/residual_spectrum.png\n")
-        f.write("Step response: phase1/results/adaptation_step_response.png\n\n")
+        f.write("Step response: phase1/results/adaptation_step_response.png\n")
+        f.write("b_hat trace: phase1/results/b_hat_trace.png\n")
+        f.write("c_hat trace: phase1/results/c_hat_trace.png\n\n")
         f.write(f"Rep HF ratio (>10Hz): {adap_summary['rep_hf_ratio']:.4f}\n\n")
 
-        # pass/fail + postmortem (Phase 1.2 aggressive)
+        # pass/fail + postmortem (Phase 1.3 structural)
         b0 = adap_summary["B0"]
         b1 = adap_summary["B1"]
         rec_improve = (b0["recovery_time_after_step"] - b1["recovery_time_after_step"]) / max(1e-6, b0["recovery_time_after_step"])
         effort_improve = (b0["effort"] - b1["effort"]) / max(1e-6, b0["effort"])
         steady_improve = (b0["steady_state_error"] - b1["steady_state_error"]) / max(1e-6, b0["steady_state_error"])
         smooth_ok = b1["smoothness"] <= 1.02 * b0["smoothness"]
-        corr_ok = abs(b1["corr_res_dist"]) >= 0.6
+        corr_ok = abs(b1["corr_b"]) >= 0.8
+        c_ok = b1["c_relerr"] <= 0.2
         hf_ok = adap_summary["rep_hf_ratio"] <= 0.2
 
-        passed = (rec_improve >= 0.30 and effort_improve >= 0.10 and steady_improve >= 0.20 and smooth_ok and corr_ok and hf_ok)
-        f.write("\n## Gate 1.2 Status\n\n")
+        passed = (rec_improve >= 0.30 and effort_improve >= 0.10 and steady_improve >= 0.20 and smooth_ok and corr_ok and c_ok and hf_ok)
+        f.write("\n## Gate 1.3 Status\n\n")
         f.write("PASS\n\n" if passed else "FAIL\n\n")
         f.write(f"Recovery improve: {rec_improve:.2%}\n")
         f.write(f"Effort improve: {effort_improve:.2%}\n")
         f.write(f"Steady-state improve: {steady_improve:.2%}\n")
         f.write(f"Smoothness ok: {smooth_ok}\n")
-        f.write(f"Corr ok: {corr_ok}\n")
+        f.write(f"Corr(b_hat,b_true) ok: {corr_ok}\n")
+        f.write(f"c_relerr ok: {c_ok}\n")
         f.write(f"HF ratio ok: {hf_ok}\n\n")
         if not passed:
             f.write("### Postmortem (why B1≈B0)\n\n")
-            f.write("- NO_SIGNAL: residual output magnitude is tiny; correlation with true disturbance is weak.\n")
+            f.write("- NO_SIGNAL: bias/drag estimators not tracking; correlation or relerr failing.\n")
             f.write("- CHATTER: if HF ratio is high, residual is not low‑frequency.\n")
             f.write("- NO_GAIN: most scenarios show no RMSE/recovery improvement over B0.\n\n")
             f.write("**Structural fix proposals (not just LR tuning):**\n")
-            f.write("- Add bias estimator state (integral/observer) tied to disturbance channels with projection.\n")
-            f.write("- Use a richer disturbance model (piecewise constant + quadratic drag term).\n")
-            f.write("- Use low‑pass filtering on s and residual update with explicit bandwidth limit.\n\n")
+            f.write("- Add separate observer dynamics for bias and drag with leakage/forgetting.\n")
+            f.write("- Use filtered s (low‑pass) and projection in parameter space.\n")
+            f.write("- Add model‑based feedforward for drag term and learn residual around it.\n\n")
 
     # plots (success/borderline/failure)
     def plot_trace(trace, name):
