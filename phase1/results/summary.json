@@ -1,0 +1,95 @@
+{
+  "B0": {
+    "count": 3240,
+    "diverged": 0,
+    "rmse": 0.11619570929547454,
+    "effort": 53.22729330062506,
+    "smoothness": 17.250672482826822,
+    "recovery_time": 2.871040123456787,
+    "tags": {
+      "OK": 1080,
+      "NO_GAIN": 0,
+      "CHATTER": 2160,
+      "DRIFT": 0,
+      "DIVERGENCE": 0,
+      "DELAY_SENSITIVE": 0,
+      "NOISE_SENSITIVE": 0
+    }
+  },
+  "B1": {
+    "count": 3240,
+    "diverged": 0,
+    "rmse": 0.11628476226821553,
+    "effort": 53.360406037870604,
+    "smoothness": 17.290361420825178,
+    "recovery_time": 2.871033950617281,
+    "tags": {
+      "OK": 360,
+      "NO_GAIN": 2135,
+      "CHATTER": 745,
+      "DRIFT": 0,
+      "DIVERGENCE": 0,
+      "DELAY_SENSITIVE": 0,
+      "NOISE_SENSITIVE": 0
+    }
+  },
+  "B2": {
+    "count": 3240,
+    "diverged": 0,
+    "rmse": 0.11619570929547454,
+    "effort": 53.22729330062506,
+    "smoothness": 17.250672482826822,
+    "recovery_time": 2.871040123456787,
+    "tags": {
+      "OK": 1080,
+      "NO_GAIN": 0,
+      "CHATTER": 2160,
+      "DRIFT": 0,
+      "DIVERGENCE": 0,
+      "DELAY_SENSITIVE": 0,
+      "NOISE_SENSITIVE": 0
+    }
+  },
+  "B3": {
+    "count": 3240,
+    "diverged": 0,
+    "rmse": 0.11621171024721402,
+    "effort": 53.18301131565769,
+    "smoothness": 17.568489140421775,
+    "recovery_time": 2.871030864197528,
+    "tags": {
+      "OK": 1080,
+      "NO_GAIN": 0,
+      "CHATTER": 2160,
+      "DRIFT": 0,
+      "DIVERGENCE": 0,
+      "DELAY_SENSITIVE": 0,
+      "NOISE_SENSITIVE": 0
+    }
+  },
+  "B1_vs_B0": {
+    "rmse_diff_mean": 8.905297274079976e-05,
+    "rmse_diff_ci": [
+      8.434856207809479e-05,
+      9.375355150120519e-05
+    ]
+  },
+  "stress_test": {
+    "B0": {
+      "diverged": false,
+      "rmse": 0.061323794500936925,
+      "effort": 168.31846402484655,
+      "smoothness": 181.2268025540802,
+      "recovery_time": 3.73,
+      "tag": "CHATTER"
+    },
+    "B1": {
+      "diverged": false,
+      "rmse": 0.06128245533313601,
+      "effort": 168.35283635000818,
+      "smoothness": 181.56680260148994,
+      "recovery_time": 3.73,
+      "tag": "CHATTER"
+    }
+  }
+}
