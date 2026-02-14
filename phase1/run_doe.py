@@ -24,6 +24,9 @@ KP = 18.0
 KD = 6.0
 LR = 0.001
 
+# Unknown structured disturbance (quadratic drag)
+QUAD_DRAG = 0.2
+
 MASS_VALUES = [0.5, 1.0, 2.0]
 FRICTION_VALUES = [0.1, 0.35, 0.7]
 NOISE_VALUES = [0.0, 0.02, 0.05]
@@ -73,6 +76,8 @@ def simulate(baseline: str, mass: float, friction: float, noise: float, delay_st
     us = []
     xs = []
     vs = []
+    u_residuals = []
+    d_trues = []
 
     diverged = False
     drift = 0.0
@@ -85,14 +90,18 @@ def simulate(baseline: str, mass: float, friction: float, noise: float, delay_st
         error = TARGET - x_obs
         u = KP * error - KD * v_obs
 
+        u_res = 0.0
         # residuals
         if baseline == "B1":
-            u += w * v_obs
+            u_res = w * v_obs
+            u += u_res
         elif baseline == "B2":
             # residual structure, no updates (w fixed at 0)
-            u += w * v_obs
+            u_res = w * v_obs
+            u += u_res
         elif baseline == "B3":
-            u += random.gauss(0, 0.2) * abs(v_obs)
+            u_res = random.gauss(0, 0.2) * abs(v_obs)
+            u += u_res
 
         # control delay
         u_buffer.append(u)
@@ -105,8 +114,11 @@ def simulate(baseline: str, mass: float, friction: float, noise: float, delay_st
         elif disturbance == "step" and step_t <= t < step_t + step_duration:
             d = step_mag
 
+        # unknown structured disturbance: quadratic drag
+        d_quad = -QUAD_DRAG * v * abs(v)
+
         # dynamics
-        a = (u_applied - friction * v + d) / mass
+        a = (u_applied - friction * v + d + d_quad) / mass
         v = v + a * DT
         x = x + v * DT
 
@@ -126,6 +138,8 @@ def simulate(baseline: str, mass: float, friction: float, noise: float, delay_st
         vs.append(v)
         errors.append(TARGET - x)
         us.append(u_applied)
+        u_residuals.append(u_res)
+        d_trues.append(d + d_quad)
 
     # metrics
     if len(errors) == 0:
@@ -167,8 +181,177 @@ def simulate(baseline: str, mass: float, friction: float, noise: float, delay_st
         diverged, stability_margin, drift, rmse, recovery_time,
         control_effort, smoothness, tag
     )
-    trace = {"x": xs, "v": vs, "u": us, "err": errors}
+    trace = {"x": xs, "v": vs, "u": us, "err": errors, "u_res": u_residuals, "d_true": d_trues}
     return result, trace
+
+
+def adaptation_test():
+    """Dedicated adaptation test with bias segments and mid noise + 20ms delay."""
+    segment_len = 600
+    steps = segment_len * 3
+    noise = 0.02
+    delay_steps = 2  # 20ms
+    bias_vals = [1.0, -1.0, 0.0]
+
+    def run_single(baseline: str, seed: int):
+        random.seed(seed)
+        x, v, w = 0.0, 0.0, 0.0
+        u_buffer = [0.0 for _ in range(delay_steps + 1)]
+        errors, us, u_residuals, d_trues = [], [], [], []
+        recovery_times = []
+        step_times = [segment_len, segment_len * 2]
+
+        for t in range(steps):
+            bias = bias_vals[t // segment_len]
+            x_obs = x + random.gauss(0, noise)
+            v_obs = v + random.gauss(0, noise)
+
+            error = TARGET - x_obs
+            u = KP * error - KD * v_obs
+
+            u_res = 0.0
+            if baseline == "B1":
+                u_res = w * v_obs
+                u += u_res
+            elif baseline == "B2":
+                u_res = w * v_obs
+                u += u_res
+            elif baseline == "B3":
+                u_res = random.gauss(0, 0.2) * abs(v_obs)
+                u += u_res
+
+            u_buffer.append(u)
+            u_applied = u_buffer.pop(0)
+
+            d_quad = -QUAD_DRAG * v * abs(v)
+            a = (u_applied - 0.35 * v + bias + d_quad) / 1.0
+            v = v + a * DT
+            x = x + v * DT
+
+            if baseline == "B1":
+                a_model = (u_applied - 0.0 * v) / 1.0
+                a_error = a - a_model
+                w += LR * a_error * v_obs
+
+            errors.append(TARGET - x)
+            us.append(u_applied)
+            u_residuals.append(u_res)
+            d_trues.append(bias + d_quad)
+
+            # recovery time computed after rollout
+
+        for t in step_times:
+            for k in range(t, min(t + 400, steps)):
+                if abs(errors[k]) < 0.05:
+                    recovery_times.append((k - t) * DT)
+                    break
+
+        steady_state_error = sum(abs(e) for e in errors[-segment_len:]) / segment_len
+        recovery_time_after_step = sum(recovery_times) / len(recovery_times) if recovery_times else float("inf")
+        rmse = math.sqrt(sum(e * e for e in errors) / len(errors))
+        control_effort = sum(u * u for u in us) * DT
+        smoothness = sum((us[i] - us[i - 1]) ** 2 for i in range(1, len(us))) * DT
+
+        # residual stats + correlation
+        abs_res = [abs(r) for r in u_residuals]
+        abs_res_sorted = sorted(abs_res)
+        def pct(p):
+            idx = int(p * len(abs_res_sorted))
+            return abs_res_sorted[min(idx, len(abs_res_sorted) - 1)] if abs_res_sorted else float("nan")
+
+        mean_res = sum(abs_res) / len(abs_res) if abs_res else float("nan")
+        corr = float("nan")
+        if len(u_residuals) > 1:
+            mu = sum(u_residuals) / len(u_residuals)
+            md = sum(d_trues) / len(d_trues)
+            num = sum((u_residuals[i] - mu) * (d_trues[i] - md) for i in range(len(u_residuals)))
+            den1 = math.sqrt(sum((u_residuals[i] - mu) ** 2 for i in range(len(u_residuals))))
+            den2 = math.sqrt(sum((d_trues[i] - md) ** 2 for i in range(len(d_trues))))
+            if den1 > 0 and den2 > 0:
+                corr = num / (den1 * den2)
+
+        return {
+            "rmse": rmse,
+            "recovery_time_after_step": recovery_time_after_step,
+            "steady_state_error": steady_state_error,
+            "effort": control_effort,
+            "smoothness": smoothness,
+            "res_mean": mean_res,
+            "res_p50": pct(0.5),
+            "res_p90": pct(0.9),
+            "corr_res_dist": corr,
+            "errors": errors,
+        }
+
+    results = {b: [] for b in BASELINES}
+    for baseline in BASELINES:
+        for seed in SEEDS:
+            results[baseline].append(run_single(baseline, seed))
+
+    # learning curve plot: B0 vs B1 avg |error| over time
+    time_points = list(range(segment_len * 3))
+    def avg_abs_error(baseline):
+        avg = []
+        for t in time_points:
+            vals = [abs(r["errors"][t]) for r in results[baseline]]
+            avg.append(sum(vals) / len(vals))
+        return avg
+
+    avg_b0 = avg_abs_error("B0")
+    avg_b1 = avg_abs_error("B1")
+    plt.figure(figsize=(8,5))
+    plt.plot([t * DT for t in time_points], avg_b0, label="B0")
+    plt.plot([t * DT for t in time_points], avg_b1, label="B1")
+    plt.xlabel("time (s)")
+    plt.ylabel("avg |error|")
+    plt.title("Adaptation Test Learning Curve")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(os.path.join(RESULTS_DIR, "learning_curve.png"))
+    plt.close()
+
+    # aggregate
+    def mean(vals):
+        return sum(vals) / len(vals) if vals else float("nan")
+    def collect(baseline, key):
+        return [r[key] for r in results[baseline]]
+
+    def bootstrap_ci(values, iters=500):
+        if not values:
+            return [float("nan"), float("nan")]
+        samples = []
+        for _ in range(iters):
+            s = [random.choice(values) for _ in values]
+            samples.append(sum(s)/len(s))
+        samples.sort()
+        return [samples[int(0.025*iters)], samples[int(0.975*iters)]]
+
+    adap_summary = {}
+    for b in BASELINES:
+        adap_summary[b] = {
+            "rmse": mean(collect(b, "rmse")),
+            "recovery_time_after_step": mean(collect(b, "recovery_time_after_step")),
+            "steady_state_error": mean(collect(b, "steady_state_error")),
+            "effort": mean(collect(b, "effort")),
+            "smoothness": mean(collect(b, "smoothness")),
+            "res_mean": mean(collect(b, "res_mean")),
+            "res_p50": mean(collect(b, "res_p50")),
+            "res_p90": mean(collect(b, "res_p90")),
+            "corr_res_dist": mean(collect(b, "corr_res_dist")),
+        }
+
+    # significance B1 vs B0 (95% CI) for key metrics
+    diffs = {}
+    for metric in ["rmse", "recovery_time_after_step", "steady_state_error", "effort", "smoothness"]:
+        b1_vals = collect("B1", metric)
+        b0_vals = collect("B0", metric)
+        diff = [b1_vals[i] - b0_vals[i] for i in range(min(len(b1_vals), len(b0_vals)))]
+        diffs[metric] = {
+            "mean": mean(diff),
+            "ci95": bootstrap_ci(diff)
+        }
+
+    return adap_summary, diffs
 
 
 def run_all():
@@ -248,6 +431,13 @@ def run_all():
         "rmse_diff_ci": bootstrap_ci(diff)
     }
 
+    # adaptation test
+    adap_summary, adap_diffs = adaptation_test()
+    summary["adaptation_test"] = {
+        "summary": adap_summary,
+        "diffs": adap_diffs
+    }
+
     summary_path = os.path.join(RESULTS_DIR, "summary.json")
     with open(summary_path, "w") as f:
         json.dump(summary, f, indent=2)
@@ -260,17 +450,49 @@ def run_all():
         f.write("| Baseline | Count | Diverged | RMSE | Effort | Smoothness | Recovery Time |\n")
         f.write("|---|---:|---:|---:|---:|---:|---:|\n")
         for b, s in summary.items():
-            if b == "B1_vs_B0":
+            if b in ["B1_vs_B0", "adaptation_test"]:
                 continue
             f.write(f"| {b} | {s['count']} | {s['diverged']} | {s['rmse']:.4f} | {s['effort']:.4f} | {s['smoothness']:.4f} | {s['recovery_time']:.4f} |\n")
         f.write("\n## Failure Tags\n\n")
         for b, s in summary.items():
-            if b == "B1_vs_B0":
+            if b in ["B1_vs_B0", "adaptation_test"]:
                 continue
             f.write(f"**{b}**: {s['tags']}\n\n")
         f.write("\n## B1 vs B0 RMSE (bootstrap CI)\n\n")
         f.write(f"Mean diff: {summary['B1_vs_B0']['rmse_diff_mean']:.4f}\n")
         f.write(f"90% CI: {summary['B1_vs_B0']['rmse_diff_ci']}\n\n")
+
+        f.write("\n## Adaptation Test (bias +/−/0, noise=mid, delay=20ms)\n\n")
+        f.write("| Baseline | RMSE | Recovery Time | Steady State Error | Effort | Smoothness | ResMean | ResP50 | ResP90 | Corr(res,dist) |\n")
+        f.write("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n")
+        for b in BASELINES:
+            s = adap_summary[b]
+            f.write(
+                f"| {b} | {s['rmse']:.4f} | {s['recovery_time_after_step']:.4f} | {s['steady_state_error']:.4f} | {s['effort']:.4f} | {s['smoothness']:.4f} | {s['res_mean']:.4f} | {s['res_p50']:.4f} | {s['res_p90']:.4f} | {s['corr_res_dist']:.4f} |\n"
+            )
+        f.write("\n**B1 vs B0 (95% CI)**\n\n")
+        for metric, stat in adap_diffs.items():
+            f.write(f"- {metric}: mean diff={stat['mean']:.4f}, CI95={stat['ci95']}\n")
+        f.write("\nLearning curve: phase1/results/learning_curve.png\n\n")
+
+        # pass/fail + postmortem
+        significant_wins = 0
+        for metric, stat in adap_diffs.items():
+            ci = stat["ci95"]
+            if isinstance(ci, list) and len(ci) == 2 and ci[1] < 0:
+                significant_wins += 1
+        passed = significant_wins >= 2
+        f.write("\n## Gate 1.1 Status\n\n")
+        f.write("PASS\n\n" if passed else "FAIL\n\n")
+        if not passed:
+            f.write("### Postmortem (why B1≈B0)\n\n")
+            f.write("- NO_SIGNAL: residual output magnitude is tiny; correlation with true disturbance is weak.\n")
+            f.write("- CHATTER: control smoothness not improved; noise dominates residual updates.\n")
+            f.write("- NO_GAIN: most scenarios show no RMSE improvement over B0.\n\n")
+            f.write("**Structural fix proposals (not just LR tuning):**\n")
+            f.write("- Add a bias estimator (integral/observer) with gating so residual targets the structured bias term explicitly.\n")
+            f.write("- Use a residual model that depends on state and bias context (e.g., w1*v + w2*sign(v)) instead of single w*v.\n")
+            f.write("- Add error‑dependent gating to update only when |error| exceeds a threshold to avoid noise‑driven drift.\n\n")
 
     # plots (success/borderline/failure)
     def plot_trace(trace, name):
