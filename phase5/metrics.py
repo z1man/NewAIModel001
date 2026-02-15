@@ -1,4 +1,5 @@
 """Metrics and KPI calculations."""
+
 from __future__ import annotations
 
 import math
@@ -19,13 +20,17 @@ class KPIResult:
     recovery: float
     in_band: float
     max_abs: float
+    mean_ref_diff: float
+    rms_rf_over_r: float
+    pct_dr_min: float
+    pct_a_min: float
 
 
 def compute_kpis(trace: SimTrace, config: Phase5Config) -> KPIResult:
     errors = trace.errors
     sats = trace.sats
     sat_total = float(np.mean(sats))
-    rmse = math.sqrt(float(np.mean(errors ** 2)))
+    rmse = math.sqrt(float(np.mean(errors**2)))
     mean_abs = float(np.mean(np.abs(errors)))
     max_abs = float(np.max(np.abs(errors)))
 
@@ -39,6 +44,14 @@ def compute_kpis(trace: SimTrace, config: Phase5Config) -> KPIResult:
                 break
 
     in_band = float(np.mean(np.abs(errors) < config.recovery_eps))
+    ref_diff = np.abs(trace.r_vals - trace.r_feasible_vals)
+    mean_ref_diff = float(np.mean(ref_diff))
+    rms_rf = float(np.sqrt(np.mean(trace.r_feasible_vals**2)))
+    rms_r = float(np.sqrt(np.mean(trace.r_vals**2)))
+    rms_rf_over_r = rms_rf / rms_r if rms_r > 0 else float("nan")
+    pct_dr_min = float(np.mean(trace.dr_max_vals <= config.dr_min + 1e-6))
+    pct_a_min = float(np.mean(trace.a_scale_vals <= config.a_min + 1e-6))
+
     return KPIResult(
         sat_total=sat_total,
         rmse=rmse,
@@ -46,6 +59,10 @@ def compute_kpis(trace: SimTrace, config: Phase5Config) -> KPIResult:
         recovery=recovery,
         in_band=in_band,
         max_abs=max_abs,
+        mean_ref_diff=mean_ref_diff,
+        rms_rf_over_r=rms_rf_over_r,
+        pct_dr_min=pct_dr_min,
+        pct_a_min=pct_a_min,
     )
 
 
@@ -57,4 +74,8 @@ def kpis_to_dict(kpis: KPIResult) -> Dict[str, float]:
         "recovery": kpis.recovery,
         "in_band": kpis.in_band,
         "max_abs": kpis.max_abs,
+        "mean_ref_diff": kpis.mean_ref_diff,
+        "rms_rf_over_r": kpis.rms_rf_over_r,
+        "pct_dr_min": kpis.pct_dr_min,
+        "pct_a_min": kpis.pct_a_min,
     }

@@ -1,4 +1,5 @@
 """Phase 5 config helpers."""
+
 from __future__ import annotations
 
 import json
@@ -40,6 +41,9 @@ class Phase5Config:
     dagger_iterations: int = 1
     eval_sine_amps: List[float] = None
     eval_sine_freqs: List[float] = None
+    train_seeds: List[int] = None
+    eval_seeds: List[int] = None
+    random_ref_count: int = 10
 
     def __post_init__(self) -> None:
         if self.dist_scales is None:
@@ -52,6 +56,10 @@ class Phase5Config:
             self.eval_sine_amps = [0.25, 0.5, 0.75]
         if self.eval_sine_freqs is None:
             self.eval_sine_freqs = [0.1, 0.2, 0.3, 0.5, 1.0]
+        if self.train_seeds is None:
+            self.train_seeds = [0, 1]
+        if self.eval_seeds is None:
+            self.eval_seeds = [10]
 
     @property
     def c_true(self) -> float:

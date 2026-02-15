@@ -29,5 +29,8 @@
   "dagger_l2": 0.0005,
   "dagger_iterations": 1,
   "eval_sine_amps": [0.25, 0.5, 0.75],
-  "eval_sine_freqs": [0.1, 0.2, 0.3, 0.5, 1.0]
+  "eval_sine_freqs": [0.1, 0.2, 0.3, 0.5, 1.0],
+  "train_seeds": [0, 1],
+  "eval_seeds": [10],
+  "random_ref_count": 3
 }

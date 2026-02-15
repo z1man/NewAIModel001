@@ -1,4 +1,5 @@
 """Policies for Phase 5."""
+
 from __future__ import annotations
 
 import math
@@ -28,7 +29,9 @@ class ClassifierModel:
         return int(np.argmax(logits))
 
 
-def cg_v1_update(r: float, state: EnvState, config: Phase5Config, sat_hist: list) -> Tuple[float, EnvState]:
+def cg_v1_update(
+    r: float, state: EnvState, config: Phase5Config, sat_hist: list
+) -> Tuple[float, EnvState]:
     tau = 0.5
     alpha = config.dt / tau
     sat_hi = 0.2
@@ -40,6 +43,7 @@ def cg_v1_update(r: float, state: EnvState, config: Phase5Config, sat_hist: list
         1.0 if (len(sat_hist) > 0 and sat_hist[-1] == 1) else 0.0
     )
     dr_max = getattr(state, "dr_max", 1.0)
+    setattr(state, "a_scale", config.a_max)
     if sat_rate > sat_hi:
         dr_max *= down
     elif sat_rate < sat_lo:
@@ -51,11 +55,18 @@ def cg_v1_update(r: float, state: EnvState, config: Phase5Config, sat_hist: list
     return state.r_feasible, state
 
 
-def baseline_policy(r: float, state: EnvState, dist_scale: float, config: Phase5Config) -> Tuple[float, EnvState]:
+def baseline_policy(
+    r: float, state: EnvState, dist_scale: float, config: Phase5Config
+) -> Tuple[float, EnvState]:
+    setattr(state, "dr_max", config.dr_cap)
+    setattr(state, "a_scale", config.a_max)
+    state.r_feasible = r
     return r, state
 
 
-def cg_v1_policy(r: float, state: EnvState, dist_scale: float, config: Phase5Config) -> Tuple[float, EnvState]:
+def cg_v1_policy(
+    r: float, state: EnvState, dist_scale: float, config: Phase5Config
+) -> Tuple[float, EnvState]:
     if not hasattr(state, "sat_hist"):
         setattr(state, "sat_hist", [])
     sat_hist = getattr(state, "sat_hist")
@@ -71,7 +82,9 @@ def student_policy(
     model: ClassifierModel,
     action_grid: ActionGrid,
 ) -> Tuple[float, EnvState]:
-    feat = np.array([r, state.x, state.v, state.r_feasible, dist_scale, state.sat_prev], dtype=float)
+    feat = np.array(
+        [r, state.x, state.v, state.r_feasible, dist_scale, state.sat_prev], dtype=float
+    )
     action_idx = model.predict_action(feat)
     dr_max, a_scale = action_to_params(action_grid, action_idx)
     r_use, next_state = apply_action(r, state, dr_max, a_scale, config)
@@ -94,8 +107,8 @@ def train_classifier(
     n_train = int(0.7 * len(X))
     n_val = int(0.15 * len(X))
     X_train, y_train = X[:n_train], y_idx[:n_train]
-    X_val, y_val = X[n_train:n_train + n_val], y_idx[n_train:n_train + n_val]
-    X_test, y_test = X[n_train + n_val:], y_idx[n_train + n_val:]
+    X_val, y_val = X[n_train : n_train + n_val], y_idx[n_train : n_train + n_val]
+    X_test, y_test = X[n_train + n_val :], y_idx[n_train + n_val :]
 
     x_mean = X_train.mean(axis=0)
     x_std = X_train.std(axis=0) + 1e-6
@@ -118,7 +131,7 @@ def train_classifier(
         probs = softmax(logits)
         y_onehot = np.eye(n_classes)[y]
         loss = -np.mean(np.sum(y_onehot * np.log(probs + 1e-9), axis=1))
-        loss += l2 * np.sum(w ** 2)
+        loss += l2 * np.sum(w**2)
         grad_logits = (probs - y_onehot) / len(Xn)
         grad_w = Xn.T @ grad_logits + 2.0 * l2 * w
         grad_b = np.sum(grad_logits, axis=0)

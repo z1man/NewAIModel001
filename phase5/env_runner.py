@@ -1,4 +1,5 @@
 """Environment runner utilities for Phase 5."""
+
 from __future__ import annotations
 
 import math
@@ -32,6 +33,10 @@ class EnvState:
 class SimTrace:
     errors: np.ndarray
     sats: np.ndarray
+    r_vals: np.ndarray
+    r_feasible_vals: np.ndarray
+    dr_max_vals: np.ndarray
+    a_scale_vals: np.ndarray
 
 
 def clamp(value: float, lo: float, hi: float) -> float:
@@ -47,6 +52,11 @@ def reference_signal(ref_type: str, ref_param, t_sec: float) -> float:
     if ref_type == "sine":
         amp, freq = ref_param
         return amp * math.sin(2 * math.pi * freq * t_sec)
+    if ref_type == "custom":
+        seq = ref_param["seq"]
+        dt = ref_param.get("dt", 0.01)
+        idx = min(int(t_sec / dt), len(seq) - 1)
+        return float(seq[idx])
     return 0.0
 
 
@@ -102,6 +112,10 @@ def rollout(
     state = initial_state(config)
     errors = []
     sats = []
+    r_vals = []
+    r_feasible_vals = []
+    dr_max_vals = []
+    a_scale_vals = []
 
     for t in range(config.steps):
         r = reference_signal(ref_type, ref_param, t * config.dt)
@@ -111,5 +125,16 @@ def rollout(
             state.sat_hist.append(sat)
         errors.append(e)
         sats.append(sat)
+        r_vals.append(r)
+        r_feasible_vals.append(state.r_feasible)
+        dr_max_vals.append(getattr(state, "dr_max", config.dr_cap))
+        a_scale_vals.append(getattr(state, "a_scale", config.a_max))
 
-    return SimTrace(errors=np.array(errors), sats=np.array(sats))
+    return SimTrace(
+        errors=np.array(errors),
+        sats=np.array(sats),
+        r_vals=np.array(r_vals),
+        r_feasible_vals=np.array(r_feasible_vals),
+        dr_max_vals=np.array(dr_max_vals),
+        a_scale_vals=np.array(a_scale_vals),
+    )
