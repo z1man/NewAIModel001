@@ -40,6 +40,7 @@ BIAS_LEVELS = [1.0, 2.0, 3.0]
 DHAT_MAX = 5.0
 C_MAX = 2.0
 GATE_ERR = 0.02
+DHAT_RATE_MAX = 0.5
 
 MASS_VALUES = [0.5, 1.0, 2.0]
 FRICTION_VALUES = [0.1, 0.35, 0.7]
@@ -77,6 +78,7 @@ def simulate(baseline: str, mass: float, friction: float, noise: float, delay_st
     v = 0.0
     b_hat = 0.0
     c_hat = 0.0
+    d_hat_prev = 0.0
     w_max = DHAT_MAX
 
     # RLS state (for B1)
@@ -119,18 +121,20 @@ def simulate(baseline: str, mass: float, friction: float, noise: float, delay_st
         # residuals as disturbance estimator: u = u_nom - d_hat
         if baseline == "B1":
             d_hat = b_hat + c_hat * v_obs * abs(v_obs)
-            u_res = d_hat
-            u = u_nom - d_hat
         elif baseline == "B2":
             d_hat = b_hat + c_hat * v_obs * abs(v_obs)
-            u_res = d_hat
-            u = u_nom - d_hat
         elif baseline == "B3":
             d_hat = random.gauss(0, 0.2)
-            u_res = d_hat
-            u = u_nom - d_hat
         else:
-            u = u_nom
+            d_hat = 0.0
+
+        # clamp magnitude + rate
+        d_hat = max(-DHAT_MAX, min(DHAT_MAX, d_hat))
+        d_hat = max(d_hat_prev - DHAT_RATE_MAX, min(d_hat_prev + DHAT_RATE_MAX, d_hat))
+        d_hat_prev = d_hat
+
+        u_res = d_hat
+        u = u_nom - d_hat
 
         # control delay
         u_buffer.append(u)
@@ -195,12 +199,13 @@ def simulate(baseline: str, mass: float, friction: float, noise: float, delay_st
     control_effort = sum(u * u for u in us) * DT
     smoothness = sum((us[i] - us[i - 1]) ** 2 for i in range(1, len(us))) * DT
 
-    # recovery time: first time after disturbance where |error| < 0.05
+    # recovery time: sustained recovery window
     recovery_time = float("inf")
     if errors:
         start = impulse_t if disturbance == "impulse" else step_t
-        for i in range(start, len(errors)):
-            if abs(errors[i]) < 0.05:
+        window = int(0.2 / DT)
+        for i in range(start, len(errors) - window):
+            if all(abs(errors[j]) < 0.05 for j in range(i, i + window)):
                 recovery_time = i * DT
                 break
 
@@ -239,6 +244,7 @@ def adaptation_test():
         random.seed(seed)
         x, v = 0.0, 0.0
         b_hat, c_hat = 0.0, 0.0
+        d_hat_prev = 0.0
         theta = np.zeros(2)
         P = np.eye(2) * 10.0
         a_filt = 0.0
@@ -253,6 +259,7 @@ def adaptation_test():
 
         bias_vals = [bias_level, -bias_level, 0.0]
         id_len = int(0.2 * steps)
+        adapt_len = steps - id_len
 
         for t in range(steps):
             bias = bias_vals[t // segment_len]
@@ -272,18 +279,19 @@ def adaptation_test():
             u_res = 0.0
             if baseline == "B1":
                 d_hat = b_hat + c_hat * v_obs * abs(v_obs)
-                u_res = d_hat
-                u = u_nom - d_hat
             elif baseline == "B2":
                 d_hat = b_hat + c_hat * v_obs * abs(v_obs)
-                u_res = d_hat
-                u = u_nom - d_hat
             elif baseline == "B3":
                 d_hat = random.gauss(0, 0.2)
-                u_res = d_hat
-                u = u_nom - d_hat
             else:
-                u = u_nom
+                d_hat = 0.0
+
+            d_hat = max(-DHAT_MAX, min(DHAT_MAX, d_hat))
+            d_hat = max(d_hat_prev - DHAT_RATE_MAX, min(d_hat_prev + DHAT_RATE_MAX, d_hat))
+            d_hat_prev = d_hat
+
+            u_res = d_hat
+            u = u_nom - d_hat
 
             u_buffer.append(u)
             u_applied = u_buffer.pop(0)
@@ -294,7 +302,7 @@ def adaptation_test():
             x = x + v * DT
 
             if baseline == "B1":
-                # RLS update
+                # RLS update (two-stage)
                 a_est = (v - v_prev) / DT if t > 0 else 0.0
                 a_filt = 0.8 * a_filt + 0.2 * a_est
                 y = 1.0 * a_filt - u_applied
@@ -302,7 +310,14 @@ def adaptation_test():
                 P_phi = P @ phi
                 gain = P_phi / (RLS_LAMBDA + phi.T @ P_phi)
                 err = y - phi.T @ theta
-                theta = theta + gain * err
+
+                if t < id_len:
+                    # Stage A: estimate c_hat only
+                    theta = theta + gain * err * np.array([0.0, 1.0])
+                else:
+                    # Stage B: estimate b_hat only (c_hat frozen)
+                    theta = theta + gain * err * np.array([1.0, 0.0])
+
                 P = (P - np.outer(gain, phi.T) @ P) / RLS_LAMBDA
                 b_hat = float(np.clip(theta[0], -DHAT_MAX, DHAT_MAX))
                 c_hat = float(np.clip(theta[1], 0.0, C_MAX))
@@ -321,9 +336,10 @@ def adaptation_test():
 
             # recovery time computed after rollout
 
+        window = int(0.2 / DT)
         for t in step_times:
-            for k in range(t, min(t + 400, steps)):
-                if abs(errors[k]) < 0.05:
+            for k in range(t, min(t + 400, steps - window)):
+                if all(abs(errors[j]) < 0.05 for j in range(k, k + window)):
                     recovery_times.append((k - t) * DT)
                     break
 
@@ -668,6 +684,7 @@ def run_all():
     report_path = os.path.join(RESULTS_DIR, "report.md")
     with open(report_path, "w") as f:
         f.write("# Phase 1 DOE Report\n\n")
+        f.write("**Recovery metric update:** recovery_time_after_step uses sustained recovery: after a step, the earliest time where |e|<eps holds continuously for 200ms.\n\n")
         f.write("## Summary (means)\n\n")
         f.write("| Baseline | Count | Diverged | RMSE | Effort | Smoothness | Recovery Time |\n")
         f.write("|---|---:|---:|---:|---:|---:|---:|\n")
