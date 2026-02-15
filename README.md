@@ -44,3 +44,26 @@ Artifacts are written to `phase6/artifacts/run_<run_id>/` and include:
 ### Config
 
 Edit `phase6/configs/phase6_default.json` to adjust the domain randomization ranges, safety thresholds, adaptation gains, and evaluation grid.
+
+## Phase 7: Tokenized QP Projection + M-Gates
+
+Phase 7 introduces a deterministic tokenization + QP projection framework with M1-M5 gate checks and structured reports.
+
+### Run (one command)
+
+```bash
+python -m phase7.run_phase7 --config phase7/configs/phase7_default.json
+```
+
+Artifacts are written to `phase7/artifacts/run_<run_id>/` and include:
+- `config_snapshot.json`
+- `token_stream.npz`
+- `token_stats.json`
+- `metrics.json`
+- `gates.json`
+- `projection_report.csv`
+- `phase7_summary.md`
+
+### Config
+
+Edit `phase7/configs/phase7_default.json` to adjust the QP bounds, gate thresholds, token scaling, and dynamics constants.
