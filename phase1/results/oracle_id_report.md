@@ -1,5 +1,5 @@
 # Step A – Oracle Identifiability
 
-c_relerr: 1.0000
+c_relerr: 0.2996
 
-R2 proxy: 0.8699
+R2: 0.9746

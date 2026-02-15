@@ -51,12 +51,15 @@ def simulate_oracle_id(seed=0):
     x, v = 0.0, 0.0
     u_buffer = [0.0 for _ in range(DELAY_STEPS + 1)]
 
-    theta = np.zeros(2)  # [b, c]
-    P = np.eye(2) * 10.0
+    # single-parameter RLS for c
+    theta = np.zeros(1)
+    P = np.eye(1) * 10.0
 
     id_len = int(ID_FRAC * STEPS)
     c_hat_trace = []
     err_trace = []
+    y_trace = []
+    phi_trace = []
 
     for t in range(STEPS):
         # ID segment target
@@ -78,20 +81,26 @@ def simulate_oracle_id(seed=0):
         x = x + v * DT
 
         if t < id_len:
-            y = MASS * a_true - u_applied
-            phi = np.array([0.0, v * abs(v)])  # b locked to 0
+            # Option A: y = u_applied - m*a_true = c*v|v| - b (b=0)
+            y = u_applied - MASS * a_true
+            phi = np.array([v * abs(v)])
             theta, P, err = rls_update(theta, P, phi, y)
-            c_hat = float(np.clip(theta[1], 0.0, C_MAX))
-            theta[1] = c_hat
+            c_hat = float(np.clip(theta[0], 0.0, C_MAX))
+            theta[0] = c_hat
             c_hat_trace.append(c_hat)
             err_trace.append(abs(err))
+            y_trace.append(float(y))
+            phi_trace.append(float(phi[0]))
 
     c_true = QUAD_DRAG_BASE * DRAG_MULT
     c_relerr = abs(c_hat_trace[-1] - c_true) / max(1e-6, c_true)
     r2 = np.nan
-    if len(err_trace) > 5:
-        # proxy: decreasing residual trend
-        r2 = float(1.0 - np.var(err_trace[-50:]) / max(1e-6, np.var(err_trace)))
+    if len(y_trace) > 5:
+        y_arr = np.array(y_trace)
+        y_pred = np.array(phi_trace) * c_hat_trace[-1]
+        ss_res = np.sum((y_arr - y_pred) ** 2)
+        ss_tot = np.sum((y_arr - np.mean(y_arr)) ** 2)
+        r2 = float(1.0 - ss_res / ss_tot) if ss_tot > 0 else float("nan")
 
     return c_hat_trace, err_trace, c_relerr, r2
 
@@ -159,14 +168,14 @@ def simulate_kf_and_adapt(seed=0):
         a_kf = X[2]
 
         if t < id_len:
-            # estimate c only
-            y = MASS * a_kf - u_applied
+            # estimate c only (Option A)
+            y = u_applied - MASS * a_kf
             phi = np.array([0.0, v * abs(v)])
             theta, Prls, _ = rls_update(theta, Prls, phi, y)
             theta[1] = float(np.clip(theta[1], 0.0, C_MAX))
         else:
-            # estimate b only with c frozen
-            y = MASS * a_kf - u_applied
+            # estimate b only with c frozen (Option A)
+            y = u_applied - MASS * a_kf
             phi = np.array([1.0, 0.0])
             theta, Prls, _ = rls_update(theta, Prls, phi, y)
             theta[0] = float(np.clip(theta[0], -B_MAX, B_MAX))
@@ -200,12 +209,27 @@ def simulate_kf_and_adapt(seed=0):
 
 
 if __name__ == "__main__":
+    # Offline unit test (no delay/no noise, b=0)
+    c_true = QUAD_DRAG_BASE * DRAG_MULT
+    v_vals = np.linspace(-2, 2, 200)
+    a_true = np.zeros_like(v_vals)
+    u_vals = c_true * v_vals * np.abs(v_vals) + MASS * a_true
+    y = u_vals - MASS * a_true
+    phi = v_vals * np.abs(v_vals)
+    c_hat = np.sum(phi * y) / max(1e-6, np.sum(phi * phi))
+    c_relerr_unit = abs(c_hat - c_true) / max(1e-6, c_true)
+
+    with open(os.path.join(RESULTS_DIR, "offline_unit_test.txt"), "w") as f:
+        f.write(f"c_true={c_true:.4f}\n")
+        f.write(f"c_hat={c_hat:.4f}\n")
+        f.write(f"c_relerr={c_relerr_unit:.4f}\n")
+
     # Step A
     c_hat_trace, err_trace, c_relerr, r2 = simulate_oracle_id()
     with open(os.path.join(RESULTS_DIR, "oracle_id_report.md"), "w") as f:
         f.write("# Step A – Oracle Identifiability\n\n")
         f.write(f"c_relerr: {c_relerr:.4f}\n\n")
-        f.write(f"R2 proxy: {r2:.4f}\n")
+        f.write(f"R2: {r2:.4f}\n")
 
     plt.figure(figsize=(8,5))
     plt.plot(c_hat_trace)
