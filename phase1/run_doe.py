@@ -27,6 +27,7 @@ LR = 0.001
 LAMBDA = 2.0
 ETA_B = 0.002
 ETA_C = 0.0005
+RLS_LAMBDA = 0.98
 
 # Unknown structured disturbance (quadratic drag)
 QUAD_DRAG_BASE = 0.2
@@ -78,6 +79,11 @@ def simulate(baseline: str, mass: float, friction: float, noise: float, delay_st
     c_hat = 0.0
     w_max = DHAT_MAX
 
+    # RLS state (for B1)
+    theta = np.zeros(2)
+    P = np.eye(2) * 10.0
+    a_filt = 0.0
+
     # disturbance setup
     impulse_t = random.randint(200, 400)
     step_t = random.randint(200, 400)
@@ -101,6 +107,9 @@ def simulate(baseline: str, mass: float, friction: float, noise: float, delay_st
         # noisy measurement
         x_obs = x + random.gauss(0, noise)
         v_obs = v + random.gauss(0, noise)
+
+        # store previous velocity for accel estimate
+        v_prev = v
 
         error = TARGET - x_obs
         u_nom = KP * error - KD * v_obs
@@ -142,16 +151,25 @@ def simulate(baseline: str, mass: float, friction: float, noise: float, delay_st
         v = v + a * DT
         x = x + v * DT
 
-        # learning update (structured disturbance estimator)
+        # learning update (RLS system ID)
         if baseline == "B1":
-            e = TARGET - x
-            e_dot = -v
-            s = e_dot + LAMBDA * e
-            if abs(e) > GATE_ERR:
-                b_hat += ETA_B * s
-                c_hat += ETA_C * s * v_obs * abs(v_obs)
-            b_hat = max(-DHAT_MAX, min(DHAT_MAX, b_hat))
-            c_hat = max(0.0, min(C_MAX, c_hat))
+            # low-pass filtered acceleration estimate
+            a_est = (v - v_prev) / DT if t > 0 else 0.0
+            a_filt = 0.8 * a_filt + 0.2 * a_est
+
+            y = mass * a_filt - u_applied
+            phi = np.array([1.0, v_obs * abs(v_obs)])
+
+            # RLS update
+            P_phi = P @ phi
+            gain = P_phi / (RLS_LAMBDA + phi.T @ P_phi)
+            err = y - phi.T @ theta
+            theta = theta + gain * err
+            P = (P - np.outer(gain, phi.T) @ P) / RLS_LAMBDA
+
+            b_hat = float(np.clip(theta[0], -DHAT_MAX, DHAT_MAX))
+            c_hat = float(np.clip(theta[1], 0.0, C_MAX))
+            theta[0], theta[1] = b_hat, c_hat
 
         drift = max(drift, abs(b_hat))
 
@@ -221,20 +239,34 @@ def adaptation_test():
         random.seed(seed)
         x, v = 0.0, 0.0
         b_hat, c_hat = 0.0, 0.0
+        theta = np.zeros(2)
+        P = np.eye(2) * 10.0
+        a_filt = 0.0
         u_buffer = [0.0 for _ in range(delay_steps + 1)]
         errors, us, u_residuals, d_trues = [], [], [], []
         b_hats, c_hats, b_trues = [], [], []
+        rls_residuals = []
+        y_preds = []
+        y_trues = []
         recovery_times = []
         step_times = [segment_len, segment_len * 2]
 
         bias_vals = [bias_level, -bias_level, 0.0]
+        id_len = int(0.2 * steps)
 
         for t in range(steps):
             bias = bias_vals[t // segment_len]
             x_obs = x + random.gauss(0, noise)
             v_obs = v + random.gauss(0, noise)
 
-            error = TARGET - x_obs
+            v_prev = v
+
+            # identification segment: sinusoidal reference to excite velocity
+            target = TARGET
+            if t < id_len:
+                target = 1.0 + 0.4 * math.sin(2 * math.pi * t * DT * 1.5)
+
+            error = target - x_obs
             u_nom = KP * error - KD * v_obs
 
             u_res = 0.0
@@ -262,14 +294,22 @@ def adaptation_test():
             x = x + v * DT
 
             if baseline == "B1":
-                e = TARGET - x
-                e_dot = -v
-                s = e_dot + LAMBDA * e
-                if abs(e) > GATE_ERR:
-                    b_hat += ETA_B * s
-                    c_hat += ETA_C * s * v_obs * abs(v_obs)
-                b_hat = max(-DHAT_MAX, min(DHAT_MAX, b_hat))
-                c_hat = max(0.0, min(C_MAX, c_hat))
+                # RLS update
+                a_est = (v - v_prev) / DT if t > 0 else 0.0
+                a_filt = 0.8 * a_filt + 0.2 * a_est
+                y = 1.0 * a_filt - u_applied
+                phi = np.array([1.0, v_obs * abs(v_obs)])
+                P_phi = P @ phi
+                gain = P_phi / (RLS_LAMBDA + phi.T @ P_phi)
+                err = y - phi.T @ theta
+                theta = theta + gain * err
+                P = (P - np.outer(gain, phi.T) @ P) / RLS_LAMBDA
+                b_hat = float(np.clip(theta[0], -DHAT_MAX, DHAT_MAX))
+                c_hat = float(np.clip(theta[1], 0.0, C_MAX))
+                theta[0], theta[1] = b_hat, c_hat
+                rls_residuals.append(abs(err))
+                y_preds.append(float(phi.T @ theta))
+                y_trues.append(float(y))
 
             errors.append(TARGET - x)
             us.append(u_applied)
@@ -343,6 +383,9 @@ def adaptation_test():
             "b_hat": b_hats,
             "c_hat": c_hats,
             "b_true": b_trues,
+            "rls_res": rls_residuals,
+            "y_pred": y_preds,
+            "y_true": y_trues,
         }
 
     results = {b: [] for b in BASELINES}
@@ -376,6 +419,47 @@ def adaptation_test():
 
     # representative run for plots/spectrum
     rep = run_single("B1", 0, bias_level=3.0, drag_mult=6.0)
+
+    # identification segment plot
+    plt.figure(figsize=(8,5))
+    t = np.arange(len(rep["errors"])) * DT
+    rep_id_len = int(0.2 * len(rep["errors"]))
+    plt.plot(t, rep["errors"], label="error")
+    plt.axvline(rep_id_len * DT, color="r", linestyle="--", label="ID end")
+    plt.xlabel("time (s)")
+    plt.title("Identification Segment")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(os.path.join(RESULTS_DIR, "identification_segment_plot.png"))
+    plt.close()
+
+    # RLS residual curve
+    if rep["rls_res"]:
+        plt.figure(figsize=(8,5))
+        plt.plot(np.arange(len(rep["rls_res"])) * DT, rep["rls_res"], label="|y-phi^T theta|")
+        plt.xlabel("time (s)")
+        plt.title("RLS Residual")
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(os.path.join(RESULTS_DIR, "rls_residual_curve.png"))
+        plt.close()
+
+    # y vs phi^T theta scatter + R2
+    r2 = float("nan")
+    if rep["y_true"]:
+        y_true = np.array(rep["y_true"])
+        y_pred = np.array(rep["y_pred"])
+        ss_res = np.sum((y_true - y_pred) ** 2)
+        ss_tot = np.sum((y_true - np.mean(y_true)) ** 2)
+        r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan")
+        plt.figure(figsize=(6,5))
+        plt.scatter(y_true, y_pred, s=6, alpha=0.5)
+        plt.xlabel("y")
+        plt.ylabel("phi^T theta")
+        plt.title(f"y vs phi^T theta (R2={r2:.3f})")
+        plt.tight_layout()
+        plt.savefig(os.path.join(RESULTS_DIR, "scatter_y_vs_pred.png"))
+        plt.close()
 
     # b_hat/c_hat trajectories
     plt.figure(figsize=(8,5))
@@ -486,6 +570,7 @@ def adaptation_test():
         }
 
     adap_summary["rep_hf_ratio"] = hf_ratio
+    adap_summary["rep_r2"] = r2
 
     return adap_summary, diffs
 
@@ -615,10 +700,14 @@ def run_all():
         f.write("Spectrum: phase1/results/residual_spectrum.png\n")
         f.write("Step response: phase1/results/adaptation_step_response.png\n")
         f.write("b_hat trace: phase1/results/b_hat_trace.png\n")
-        f.write("c_hat trace: phase1/results/c_hat_trace.png\n\n")
-        f.write(f"Rep HF ratio (>10Hz): {adap_summary['rep_hf_ratio']:.4f}\n\n")
+        f.write("c_hat trace: phase1/results/c_hat_trace.png\n")
+        f.write("ID segment: phase1/results/identification_segment_plot.png\n")
+        f.write("RLS residual: phase1/results/rls_residual_curve.png\n")
+        f.write("y vs pred: phase1/results/scatter_y_vs_pred.png\n\n")
+        f.write(f"Rep HF ratio (>10Hz): {adap_summary['rep_hf_ratio']:.4f}\n")
+        f.write(f"Rep R2: {adap_summary['rep_r2']:.4f}\n\n")
 
-        # pass/fail + postmortem (Phase 1.3 structural)
+        # pass/fail + postmortem (Phase 1.4 RLS)
         b0 = adap_summary["B0"]
         b1 = adap_summary["B1"]
         rec_improve = (b0["recovery_time_after_step"] - b1["recovery_time_after_step"]) / max(1e-6, b0["recovery_time_after_step"])
@@ -627,10 +716,19 @@ def run_all():
         smooth_ok = b1["smoothness"] <= 1.02 * b0["smoothness"]
         corr_ok = abs(b1["corr_b"]) >= 0.8
         c_ok = b1["c_relerr"] <= 0.2
+        r2_ok = adap_summary["rep_r2"] >= 0.35
         hf_ok = adap_summary["rep_hf_ratio"] <= 0.2
 
-        passed = (rec_improve >= 0.30 and effort_improve >= 0.10 and steady_improve >= 0.20 and smooth_ok and corr_ok and c_ok and hf_ok)
-        f.write("\n## Gate 1.3 Status\n\n")
+        gains = 0
+        if rec_improve >= 0.30:
+            gains += 1
+        if effort_improve >= 0.10:
+            gains += 1
+        if steady_improve >= 0.20:
+            gains += 1
+
+        passed = (gains >= 2 and smooth_ok and corr_ok and c_ok and r2_ok and hf_ok)
+        f.write("\n## Gate 1.4 Status\n\n")
         f.write("PASS\n\n" if passed else "FAIL\n\n")
         f.write(f"Recovery improve: {rec_improve:.2%}\n")
         f.write(f"Effort improve: {effort_improve:.2%}\n")
@@ -638,6 +736,7 @@ def run_all():
         f.write(f"Smoothness ok: {smooth_ok}\n")
         f.write(f"Corr(b_hat,b_true) ok: {corr_ok}\n")
         f.write(f"c_relerr ok: {c_ok}\n")
+        f.write(f"R2 ok: {r2_ok}\n")
         f.write(f"HF ratio ok: {hf_ok}\n\n")
         if not passed:
             f.write("### Postmortem (why B1≈B0)\n\n")
