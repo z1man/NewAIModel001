@@ -151,13 +151,14 @@ def step_b_kf(friction_aware=True):
             # estimate b only with c,f frozen
             y = u_applied - MASS * a_kf
             if friction_aware:
+                # Convention: y = c*v|v| + f_v*v + b
                 b_hat = float(np.clip(y - c_hat * v * abs(v) - f_hat * v, -B_MAX, B_MAX))
             else:
                 b_hat = float(np.clip(y - c_hat * v * abs(v), -B_MAX, B_MAX))
 
         errors.append(target - x)
         us.append(u_applied)
-        b_true.append(bias)
+        b_true.append(-bias)
         b_hats.append(b_hat)
 
     # metrics
@@ -176,7 +177,10 @@ def step_b_kf(friction_aware=True):
 
     steady = sum(abs(e) for e in errors[-window:]) / window
 
-    corr_b = corr(np.array(b_true[id_len:]), np.array(b_hats[id_len:]))
+    b_true_arr = np.array(b_true[id_len:])
+    b_hat_arr = np.array(b_hats[id_len:])
+    corr_b = corr(b_hat_arr, b_true_arr)
+    alpha, beta = np.polyfit(b_true_arr, b_hat_arr, 1)
     return {
         "rmse": rmse,
         "recovery": recovery_time,
@@ -184,6 +188,8 @@ def step_b_kf(friction_aware=True):
         "effort": control_effort,
         "smooth": smoothness,
         "corr_b": corr_b,
+        "alpha": float(alpha),
+        "beta": float(beta),
     }
 
 
