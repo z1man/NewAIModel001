@@ -41,8 +41,10 @@ def simulate_episode(
     state = np.array([0.0, 0.0], dtype=float)
     ref_prev = 0.0
 
-    u_props = []
-    actions = []
+    u_prop_raw = []
+    u_prop_applied = []
+    u_star = []
+    u_applied = []
     bounds_L = []
     bounds_U = []
     proj_mag = []
@@ -65,6 +67,7 @@ def simulate_episode(
             ref = reference_signal(config, t)
 
         u_prop = baseline_controller(ref, state, ref_prev, config)
+        u_prop_apply = u_prop  # no delay model in Phase7.4
 
         _, hard_bounds = act_token.compile(state, ref, config)
         _, soft_bounds = acc_token.compile(state, ref, config)
@@ -72,8 +75,9 @@ def simulate_episode(
 
         qp_res = project_qp_soft_acc(u_prop, hard_bounds, soft_bounds, rho)
         u = qp_res.action
+        u_apply = u  # applied directly
 
-        # Runtime invariant check
+        # Runtime invariant check (projecting u_prop_raw)
         L, U = qp_res.L, qp_res.U
         if L <= u_prop <= U:
             if abs(u - u_prop) > 1e-6:
@@ -85,30 +89,34 @@ def simulate_episode(
 
         u_min = float(config.u_min[0])
         u_max = float(config.u_max[0])
-        sat = float((u <= u_min + 1e-8) or (u >= u_max - 1e-8))
+        sat = float((u_apply <= u_min + 1e-8) or (u_apply >= u_max - 1e-8))
 
-        accel = (u - config.damping * state[1] - config.spring * state[0]) / config.mass
+        accel = (u_apply - config.damping * state[1] - config.spring * state[0]) / config.mass
         state[1] = state[1] + accel * config.dt
         state[0] = state[0] + state[1] * config.dt
 
         error = ref - state[0]
         ref_prev = ref
 
-        u_props.append(u_prop)
-        actions.append(u)
+        u_prop_raw.append(u_prop)
+        u_prop_applied.append(u_prop_apply)
+        u_star.append(u)
+        u_applied.append(u_apply)
         bounds_L.append(soft_bounds[0])
         bounds_U.append(soft_bounds[1])
         proj_mag.append(qp_res.proj_mag)
         infeasible_flags.append(1.0 if qp_res.infeasible else 0.0)
-        hard_violation_flags.append(1.0 if (u < u_min - 1e-8 or u > u_max + 1e-8) else 0.0)
+        hard_violation_flags.append(1.0 if (u_apply < u_min - 1e-8 or u_apply > u_max + 1e-8) else 0.0)
         sat_flags.append(sat)
         errors.append(error)
         refs.append(ref)
         slack_vals.append(qp_res.slack)
 
     return {
-        "u_prop": np.array(u_props),
-        "u": np.array(actions),
+        "u_prop_raw": np.array(u_prop_raw),
+        "u_prop_applied": np.array(u_prop_applied),
+        "u_star": np.array(u_star),
+        "u_applied": np.array(u_applied),
         "L": np.array(bounds_L),
         "U": np.array(bounds_U),
         "proj_mag": np.array(proj_mag),
@@ -137,9 +145,14 @@ def run_sweep(config: Phase7Config, a_max_grid: List[float], rho: float) -> Dict
                 config,
             )
             xi_p95 = float(np.quantile(ep["slack"], 0.95))
+            u_max = float(config.u_max[0])
+            sat_rate_u_star = float(np.mean(np.abs(ep["u_star"]) >= 0.95 * u_max))
+            sat_rate_u_applied = float(np.mean(np.abs(ep["u_applied"]) >= 0.95 * u_max))
             results[f"a_max={a_max}_{ref_type}"] = {
                 **metrics_to_dict(metrics),
                 "xi_p95": xi_p95,
+                "sat_rate_u_star": sat_rate_u_star,
+                "sat_rate_u_applied": sat_rate_u_applied,
             }
     return results
 
@@ -198,10 +211,12 @@ def run_qp_passthrough_test(out_dir: Path) -> Dict[str, int]:
 def plot_traces(out_dir: Path, ep: Dict[str, np.ndarray], tag: str) -> None:
     import matplotlib.pyplot as plt
 
-    t = np.arange(len(ep["u"]))
-    fig, axes = plt.subplots(3, 1, figsize=(8, 8), sharex=True)
-    axes[0].plot(t, ep["u_prop"], label="u_prop")
-    axes[0].plot(t, ep["u"], label="u*")
+    t = np.arange(len(ep["u_star"]))
+    fig, axes = plt.subplots(3, 1, figsize=(9, 9), sharex=True)
+    axes[0].plot(t, ep["u_prop_raw"], label="u_prop_raw")
+    axes[0].plot(t, ep["u_prop_applied"], label="u_prop_applied")
+    axes[0].plot(t, ep["u_star"], label="u_star")
+    axes[0].plot(t, ep["u_applied"], label="u_applied")
     axes[0].plot(t, ep["L"], label="L", linestyle="--")
     axes[0].plot(t, ep["U"], label="U", linestyle="--")
     axes[0].set_ylabel("u")
@@ -211,9 +226,9 @@ def plot_traces(out_dir: Path, ep: Dict[str, np.ndarray], tag: str) -> None:
     axes[1].set_ylabel("xi")
     axes[1].legend()
 
-    axes[2].plot(t, ep["errors"], label="e")
-    axes[2].plot(t, ep["u_prop"] - ep["u"], label="u_prop - u*")
-    axes[2].set_ylabel("error / delta u")
+    axes[2].plot(t, ep["u_prop_raw"] - ep["u_star"], label="u_prop_raw - u_star")
+    axes[2].plot(t, ep["u_star"] - ep["u_applied"], label="u_star - u_applied")
+    axes[2].set_ylabel("delta u")
     axes[2].set_xlabel("t")
     axes[2].legend()
 
@@ -252,15 +267,27 @@ def main() -> None:
 
     sweep = run_sweep(config, a_max_grid, rho)
 
-    # plot example traces for mid a_max
-    config.a_max = a_max_grid[1]
-    ep_step = simulate_episode(config, "step", config.a_max, rho)
-    ep_sine = simulate_episode(config, "sine", config.a_max, rho)
+    # stop if any hard violation
+    if any(vals["hard_violation_rate"] > 0 for vals in sweep.values()):
+        raise RuntimeError("Hard actuator violation detected; stopping per Phase7.4")
 
-    violations = ep_step["invariant_violations"] + ep_sine["invariant_violations"]
+    # plot example traces for a_max=1.0 and 2.0
+    ep_step = simulate_episode(config, "step", 1.0, rho)
+    ep_sine = simulate_episode(config, "sine", 1.0, rho)
+    ep_step_hi = simulate_episode(config, "step", 2.0, rho)
+    ep_sine_hi = simulate_episode(config, "sine", 2.0, rho)
 
-    plot_traces(out_dir, ep_step, f"step_{run_id}")
-    plot_traces(out_dir, ep_sine, f"sine_{run_id}")
+    violations = (
+        ep_step["invariant_violations"]
+        + ep_sine["invariant_violations"]
+        + ep_step_hi["invariant_violations"]
+        + ep_sine_hi["invariant_violations"]
+    )
+
+    plot_traces(out_dir, ep_step, f"step_{run_id}_a1")
+    plot_traces(out_dir, ep_sine, f"sine_{run_id}_a1")
+    plot_traces(out_dir, ep_step_hi, f"step_{run_id}_a2")
+    plot_traces(out_dir, ep_sine_hi, f"sine_{run_id}_a2")
 
     report_path = out_dir / f"phase7_2_diagnosis_{run_id}.md"
     with open(report_path, "w") as f:
@@ -288,14 +315,14 @@ def main() -> None:
         f.write("\n")
 
         f.write("## a_max Sweep (baseline+QP)\n")
-        f.write("| case | RMSE | saturation_rate | proj_mean | xi_p95 |\n")
-        f.write("|---|---:|---:|---:|---:|\n")
+        f.write("| case | RMSE | sat_rate_u_star | sat_rate_u_applied | proj_mean | xi_p95 |\n")
+        f.write("|---|---:|---:|---:|---:|---:|\n")
         for key, vals in sweep.items():
             f.write(
-                f"| {key} | {vals['rmse']:.4f} | {vals['saturation_rate']:.2%} | {vals['proj_mean']:.4f} | {vals['xi_p95']:.4f} |\n"
+                f"| {key} | {vals['rmse']:.4f} | {vals['sat_rate_u_star']:.2%} | {vals['sat_rate_u_applied']:.2%} | {vals['proj_mean']:.4f} | {vals['xi_p95']:.4f} |\n"
             )
 
-        f.write("\n## Slack Stats (a_max mid)\n")
+        f.write("\n## Slack Stats (a_max=1.0)\n")
         f.write(
             f"- step xi_mean={ep_step['slack'].mean():.4f}, p95={np.quantile(ep_step['slack'],0.95):.4f}, p99={np.quantile(ep_step['slack'],0.99):.4f}\n"
         )
@@ -304,8 +331,10 @@ def main() -> None:
         )
 
         f.write("## Plots\n")
-        f.write(f"- trace_step: trace_step_{run_id}.png\n")
-        f.write(f"- trace_sine: trace_sine_{run_id}.png\n")
+        f.write(f"- trace_step_a1: trace_step_{run_id}_a1.png\n")
+        f.write(f"- trace_sine_a1: trace_sine_{run_id}_a1.png\n")
+        f.write(f"- trace_step_a2: trace_step_{run_id}_a2.png\n")
+        f.write(f"- trace_sine_a2: trace_sine_{run_id}_a2.png\n")
 
     print(f"Phase 7.2 diagnosis complete. Report in {report_path}")
 
