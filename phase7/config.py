@@ -15,16 +15,18 @@ class Phase7Config:
     dt: float = 0.01
     steps: int = 1200
     state_dim: int = 2
-    action_dim: int = 2
+    action_dim: int = 1
     ref_amp: float = 0.8
     ref_freq: float = 0.2
     damping: float = 0.35
     spring: float = 0.25
-    control_gain: float = 1.0
-    bias_gain: float = 0.35
+    mass: float = 1.0
+    kp: float = 18.0
+    kd: float = 6.0
+    kv_nom: float = 0.5
     u_min: List[float] = None
     u_max: List[float] = None
-    sum_u_max: float = 1.25
+    a_max: float = 1.0
     token_clip: float = 3.0
     token_scale: float = 1.0
     band: float = 0.08
@@ -36,9 +38,9 @@ class Phase7Config:
 
     def __post_init__(self) -> None:
         if self.u_min is None:
-            self.u_min = [-1.0, -0.6]
+            self.u_min = [-1.0]
         if self.u_max is None:
-            self.u_max = [1.0, 0.6]
+            self.u_max = [1.0]
 
 
 def load_config(path: str | Path) -> Phase7Config:
