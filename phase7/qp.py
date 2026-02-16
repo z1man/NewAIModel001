@@ -79,13 +79,16 @@ def project_qp_soft_acc(
 ) -> QPResult:
     L_soft, U_soft = soft_bounds
     L_hard, U_hard = hard_bounds
+    L_eff = max(L_soft, L_hard)
+    U_eff = min(U_soft, U_hard)
+
     if L_hard > U_hard:
         u_star = float(np.clip(u_prop, L_hard, U_hard))
         proj_mag = abs(u_star - u_prop)
         return QPResult(
             action=u_star,
-            L=L_hard,
-            U=U_hard,
+            L=L_eff,
+            U=U_eff,
             projected=True,
             proj_mag=proj_mag,
             feasible=False,
@@ -110,8 +113,8 @@ def project_qp_soft_acc(
     projected = not np.isclose(u_star, u_prop)
     return QPResult(
         action=u_star,
-        L=L_soft,
-        U=U_soft,
+        L=L_eff,
+        U=U_eff,
         projected=projected,
         proj_mag=proj_mag,
         feasible=True,

@@ -17,7 +17,7 @@ class MetricResult:
     mean_abs: float
     max_abs: float
     in_band: float
-    sat_rate: float
+    saturation_rate: float
     hard_violation_rate: float
     infeasible_rate: float
     proj_mean: float
@@ -36,7 +36,7 @@ def compute_metrics(
     mean_abs = float(np.mean(np.abs(errors)))
     max_abs = float(np.max(np.abs(errors)))
     in_band = float(np.mean(np.abs(errors) < config.band))
-    sat_rate = float(np.mean(sat_flags))
+    saturation_rate = float(np.mean(sat_flags))
     hard_violation_rate = float(np.mean(hard_violation_flags))
     infeasible_rate = float(np.mean(infeasible_flags))
     proj_mean = float(np.mean(proj_mag))
@@ -47,7 +47,7 @@ def compute_metrics(
         mean_abs=mean_abs,
         max_abs=max_abs,
         in_band=in_band,
-        sat_rate=sat_rate,
+        saturation_rate=saturation_rate,
         hard_violation_rate=hard_violation_rate,
         infeasible_rate=infeasible_rate,
         proj_mean=proj_mean,
@@ -61,7 +61,7 @@ def metrics_to_dict(metrics: MetricResult) -> Dict[str, float]:
         "mean_abs": metrics.mean_abs,
         "max_abs": metrics.max_abs,
         "in_band": metrics.in_band,
-        "sat_rate": metrics.sat_rate,
+        "saturation_rate": metrics.saturation_rate,
         "hard_violation_rate": metrics.hard_violation_rate,
         "infeasible_rate": metrics.infeasible_rate,
         "proj_mean": metrics.proj_mean,
@@ -87,9 +87,9 @@ def evaluate_gates(metrics: MetricResult, config: Phase7Config) -> Dict[str, Dic
             "pass": metrics.rmse <= config.m3_rmse_max,
         },
         "M4_sat": {
-            "rate": metrics.sat_rate,
+            "rate": metrics.saturation_rate,
             "limit": config.m4_sat_max,
-            "pass": metrics.sat_rate <= config.m4_sat_max,
+            "pass": metrics.saturation_rate <= config.m4_sat_max,
         },
         "M5_kpi": {
             "mean_abs": metrics.mean_abs,
